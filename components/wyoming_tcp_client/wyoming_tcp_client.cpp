@@ -1,10 +1,16 @@
 #include "wyoming_tcp_client.h"
 #include "esphome/core/log.h"
 
+#include <lwip/sockets.h>
+#include <lwip/netdb.h>
+#include <errno.h>
+
 namespace esphome {
 namespace wyoming_tcp_client {
 
 static const char *const TAG = "wyoming_tcp";
+
+// ─── Component lifecycle ─────────────────────────────────────────────────────
 
 void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Setting up Wyoming TCP client -> %s:%d",
@@ -59,18 +65,311 @@ void WyomingTcpClient::stop() {
   this->disconnect_();
 }
 
-// Stubs — implemented in Task 2 and 3
-bool WyomingTcpClient::connect_() { return false; }
-void WyomingTcpClient::disconnect_() {}
-bool WyomingTcpClient::send_event_(const char *, const char *,
-                                    const uint8_t *, size_t) { return false; }
-void WyomingTcpClient::send_audio_start_() {}
-void WyomingTcpClient::send_audio_stop_() {}
-bool WyomingTcpClient::receive_events_() { return false; }
-void WyomingTcpClient::net_task_(void *param) {}
-void WyomingTcpClient::net_task_loop_() {}
-void WyomingTcpClient::handle_received_event_(const std::string &,
-    const std::string &, const std::vector<uint8_t> &) {}
+// ─── Task 2: TCP connection + Wyoming protocol framing ───────────────────────
+
+bool WyomingTcpClient::connect_() {
+  int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (sock < 0) {
+    ESP_LOGE(TAG, "socket() failed: errno %d", errno);
+    return false;
+  }
+
+  struct sockaddr_in addr{};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(this->port_);
+  if (::inet_pton(AF_INET, this->host_.c_str(), &addr.sin_addr) != 1) {
+    ESP_LOGE(TAG, "inet_pton() failed for host '%s'", this->host_.c_str());
+    ::close(sock);
+    return false;
+  }
+
+  if (::connect(sock, reinterpret_cast<struct sockaddr *>(&addr),
+                sizeof(addr)) != 0) {
+    ESP_LOGE(TAG, "connect() to %s:%d failed: errno %d",
+             this->host_.c_str(), this->port_, errno);
+    ::close(sock);
+    return false;
+  }
+
+  // Disable Nagle algorithm for low latency
+  int flag = 1;
+  ::setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+               reinterpret_cast<const void *>(&flag), sizeof(flag));
+
+  this->sock_ = sock;
+  ESP_LOGI(TAG, "Connected to %s:%d", this->host_.c_str(), this->port_);
+  return true;
+}
+
+void WyomingTcpClient::disconnect_() {
+  if (this->sock_ >= 0) {
+    ::close(this->sock_);
+    this->sock_ = -1;
+    ESP_LOGI(TAG, "Disconnected");
+  }
+}
+
+bool WyomingTcpClient::send_event_(const char *type, const char *data_json,
+                                    const uint8_t *payload,
+                                    size_t payload_len) {
+  char header[256];
+  int header_len;
+
+  size_t data_len = (data_json != nullptr) ? strlen(data_json) : 0;
+
+  if (data_json != nullptr && payload_len > 0) {
+    header_len = snprintf(header, sizeof(header),
+        "{\"type\":\"%s\",\"version\":\"1.7.2\","
+        "\"data_length\":%zu,\"payload_length\":%zu}\n",
+        type, data_len, payload_len);
+  } else if (data_json != nullptr) {
+    header_len = snprintf(header, sizeof(header),
+        "{\"type\":\"%s\",\"version\":\"1.7.2\","
+        "\"data_length\":%zu}\n",
+        type, data_len);
+  } else if (payload_len > 0) {
+    header_len = snprintf(header, sizeof(header),
+        "{\"type\":\"%s\",\"version\":\"1.7.2\","
+        "\"payload_length\":%zu}\n",
+        type, payload_len);
+  } else {
+    header_len = snprintf(header, sizeof(header),
+        "{\"type\":\"%s\",\"version\":\"1.7.2\"}\n",
+        type);
+  }
+
+  if (::send(this->sock_, header, header_len, MSG_DONTWAIT) < 0) {
+    ESP_LOGE(TAG, "send() header failed: errno %d", errno);
+    return false;
+  }
+
+  if (data_json != nullptr && data_len > 0) {
+    if (::send(this->sock_, data_json, data_len, MSG_DONTWAIT) < 0) {
+      ESP_LOGE(TAG, "send() data_json failed: errno %d", errno);
+      return false;
+    }
+  }
+
+  if (payload != nullptr && payload_len > 0) {
+    size_t sent = 0;
+    while (sent < payload_len) {
+      ssize_t n = ::send(this->sock_, payload + sent, payload_len - sent,
+                         MSG_DONTWAIT);
+      if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          vTaskDelay(pdMS_TO_TICKS(1));
+          continue;
+        }
+        ESP_LOGE(TAG, "send() payload failed: errno %d", errno);
+        return false;
+      }
+      sent += static_cast<size_t>(n);
+    }
+  }
+
+  return true;
+}
+
+void WyomingTcpClient::send_audio_start_() {
+  this->send_event_("audio-start",
+                    "{\"rate\":16000,\"width\":2,\"channels\":1}");
+}
+
+void WyomingTcpClient::send_audio_stop_() {
+  this->send_event_("audio-stop", "{\"timestamp\":null}");
+}
+
+// ─── Task 3: Network task (send + receive loop) ──────────────────────────────
+
+void WyomingTcpClient::net_task_(void *param) {
+  WyomingTcpClient *self = static_cast<WyomingTcpClient *>(param);
+  self->net_task_loop_();
+  vTaskDelete(nullptr);
+}
+
+void WyomingTcpClient::net_task_loop_() {
+  // Phase 1: Connect
+  if (!this->connect_()) {
+    ESP_LOGE(TAG, "Connection failed, entering ERROR state");
+    this->state_ = State::ERROR;
+    return;
+  }
+
+  // Phase 2: Transition to STREAMING
+  this->state_ = State::STREAMING;
+  this->speaker_->start();
+  this->send_audio_start_();
+
+  static uint8_t chunk[1024];
+
+  // Phase 3: Main loop
+  while (this->state_ == State::STREAMING ||
+         this->state_ == State::RECEIVING) {
+
+    if (this->state_ == State::STREAMING) {
+      // Drain mic_buffer_ in 1024-byte chunks
+      while (this->mic_buffer_->available() >= sizeof(chunk)) {
+        this->mic_buffer_->read((void *) chunk, sizeof(chunk), 0);
+        this->send_event_("audio-chunk",
+                          "{\"rate\":16000,\"width\":2,\"channels\":1}",
+                          chunk, sizeof(chunk));
+      }
+    }
+
+    this->receive_events_();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  // Phase 4: Cleanup
+  this->send_audio_stop_();
+  this->disconnect_();
+  this->speaker_->stop();
+  this->state_ = State::IDLE;
+}
+
+bool WyomingTcpClient::receive_events_() {
+  // Non-blocking check: select with 1ms timeout
+  fd_set read_fds;
+  FD_ZERO(&read_fds);
+  FD_SET(this->sock_, &read_fds);
+  struct timeval tv{0, 1000};  // 1ms
+
+  int ready = ::select(this->sock_ + 1, &read_fds, nullptr, nullptr, &tv);
+  if (ready <= 0) {
+    // 0 = timeout, -1 with EAGAIN/EWOULDBLOCK is benign
+    return true;
+  }
+
+  // Read header line (terminated by '\n')
+  std::string header_line;
+  header_line.reserve(256);
+  char c;
+  while (true) {
+    ssize_t n = ::recv(this->sock_, &c, 1, 0);
+    if (n <= 0) {
+      if (n == 0) {
+        ESP_LOGW(TAG, "Server closed connection during header read");
+      } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        ESP_LOGE(TAG, "recv() header byte failed: errno %d", errno);
+      }
+      return false;
+    }
+    if (c == '\n') break;
+    header_line += c;
+  }
+
+  // Parse "type" value
+  std::string type;
+  {
+    size_t pos = header_line.find("\"type\"");
+    if (pos == std::string::npos) {
+      ESP_LOGW(TAG, "No 'type' in header: %s", header_line.c_str());
+      return true;
+    }
+    pos = header_line.find('"', pos + 6);   // opening quote of value
+    if (pos == std::string::npos) return true;
+    size_t end = header_line.find('"', pos + 1);
+    if (end == std::string::npos) return true;
+    type = header_line.substr(pos + 1, end - pos - 1);
+  }
+
+  // Parse "data_length"
+  size_t data_length = 0;
+  {
+    size_t pos = header_line.find("\"data_length\"");
+    if (pos != std::string::npos) {
+      pos = header_line.find(':', pos + 13);
+      if (pos != std::string::npos) {
+        data_length = static_cast<size_t>(atoi(header_line.c_str() + pos + 1));
+      }
+    }
+  }
+
+  // Parse "payload_length"
+  size_t payload_length = 0;
+  {
+    size_t pos = header_line.find("\"payload_length\"");
+    if (pos != std::string::npos) {
+      pos = header_line.find(':', pos + 16);
+      if (pos != std::string::npos) {
+        payload_length = static_cast<size_t>(
+            atoi(header_line.c_str() + pos + 1));
+      }
+    }
+  }
+
+  // Read data bytes (blocking)
+  std::string data_json;
+  if (data_length > 0) {
+    data_json.resize(data_length);
+    size_t received = 0;
+    while (received < data_length) {
+      ssize_t n = ::recv(this->sock_,
+                         &data_json[received],
+                         data_length - received, 0);
+      if (n <= 0) {
+        if (n == 0) {
+          ESP_LOGW(TAG, "Server closed connection during data read");
+        } else {
+          ESP_LOGE(TAG, "recv() data failed: errno %d", errno);
+        }
+        return false;
+      }
+      received += static_cast<size_t>(n);
+    }
+  }
+
+  // Read payload bytes (blocking)
+  std::vector<uint8_t> payload;
+  if (payload_length > 0) {
+    payload.resize(payload_length);
+    size_t received = 0;
+    while (received < payload_length) {
+      ssize_t n = ::recv(this->sock_,
+                         payload.data() + received,
+                         payload_length - received, 0);
+      if (n <= 0) {
+        if (n == 0) {
+          ESP_LOGW(TAG, "Server closed connection during payload read");
+        } else {
+          ESP_LOGE(TAG, "recv() payload failed: errno %d", errno);
+        }
+        return false;
+      }
+      received += static_cast<size_t>(n);
+    }
+  }
+
+  this->handle_received_event_(type, data_json, payload);
+  return true;
+}
+
+void WyomingTcpClient::handle_received_event_(const std::string &type,
+                                               const std::string &data_json,
+                                               const std::vector<uint8_t> &payload) {
+  if (type == "audio-start") {
+    ESP_LOGI(TAG, "Received audio-start, switching to RECEIVING");
+    this->state_ = State::RECEIVING;
+
+  } else if (type == "audio-chunk") {
+    if (!payload.empty()) {
+      this->spk_buffer_->write(
+          const_cast<void *>(reinterpret_cast<const void *>(payload.data())),
+          payload.size());
+    }
+
+  } else if (type == "audio-stop") {
+    ESP_LOGI(TAG, "Received audio-stop, draining speaker then going IDLE");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    this->state_ = State::IDLE;
+
+  } else if (type == "transcript") {
+    ESP_LOGI(TAG, "Transcript: %s", data_json.c_str());
+
+  } else {
+    ESP_LOGW(TAG, "Unhandled event type: %s", type.c_str());
+  }
+}
 
 }  // namespace wyoming_tcp_client
 }  // namespace esphome
