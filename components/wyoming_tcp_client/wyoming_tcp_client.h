@@ -1,5 +1,6 @@
 #pragma once
 
+#include "esphome/core/automation.h"
 #include "esphome/core/component.h"
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/speaker/speaker.h"
@@ -74,6 +75,20 @@ class WyomingTcpClient : public Component {
   void handle_received_event_(const std::string &type,
                               const std::string &data_json,
                               const std::vector<uint8_t> &payload);
+};
+
+template<typename... Ts>
+class StartAction : public Action<Ts...>,
+                    public Parented<WyomingTcpClient> {
+ public:
+  void play(Ts... x) override { this->parent_->start(); }
+};
+
+template<typename... Ts>
+class StopAction : public Action<Ts...>,
+                   public Parented<WyomingTcpClient> {
+ public:
+  void play(Ts... x) override { this->parent_->stop(); }
 };
 
 }  // namespace wyoming_tcp_client

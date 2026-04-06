@@ -1,5 +1,7 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
+from esphome import automation
+from esphome.automation import maybe_simple_id
 from esphome.components import microphone, speaker
 from esphome.const import CONF_ID, CONF_HOST, CONF_PORT
 
@@ -39,3 +41,36 @@ async def to_code(config):
 
     spk = await cg.get_variable(config[CONF_SPEAKER])
     cg.add(var.set_speaker(spk))
+
+
+# Start action
+StartAction = wyoming_tcp_client_ns.class_(
+    "StartAction", automation.Action
+)
+
+WYOMING_TCP_CLIENT_ACTION_SCHEMA = maybe_simple_id(
+    {cv.GenerateID(): cv.use_id(WyomingTcpClient)}
+)
+
+@automation.register_action(
+    "wyoming_tcp_client.start", StartAction,
+    WYOMING_TCP_CLIENT_ACTION_SCHEMA,
+)
+async def wyoming_start_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
+
+# Stop action
+StopAction = wyoming_tcp_client_ns.class_(
+    "StopAction", automation.Action
+)
+
+@automation.register_action(
+    "wyoming_tcp_client.stop", StopAction,
+    WYOMING_TCP_CLIENT_ACTION_SCHEMA,
+)
+async def wyoming_stop_to_code(config, action_id, template_arg, args):
+    var = cg.new_Pvariable(action_id, template_arg)
+    await cg.register_parented(var, config[CONF_ID])
+    return var
