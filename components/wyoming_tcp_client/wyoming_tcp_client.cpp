@@ -440,7 +440,7 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
     // Launch speaker task to handle playback from spk_buffer_
     if (this->spk_task_handle_ == nullptr) {
       xTaskCreatePinnedToCore(WyomingTcpClient::spk_task_, "wyoming_spk",
-                              4096, this, 10, &this->spk_task_handle_, 0);
+                              8192, this, 10, &this->spk_task_handle_, 0);
     }
 
   } else if (type == "audio-chunk") {
