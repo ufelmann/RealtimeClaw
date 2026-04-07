@@ -59,8 +59,11 @@ void WyomingTcpClient::spk_task_loop_() {
   // Wait for pre-buffer threshold
   ESP_LOGI(TAG, "Speaker task: waiting for %zu bytes pre-buffer", PRE_BUFFER_BYTES);
   while (this->spk_buffer_->available() < PRE_BUFFER_BYTES) {
-    if (this->state_ == State::IDLE || this->state_ == State::ERROR) {
+    if (this->audio_done_ || this->state_ == State::ERROR) {
+      // Audio ended before we got enough to pre-buffer — play what we have
+      if (this->spk_buffer_->available() > 0) break;
       ESP_LOGI(TAG, "Speaker task: session ended before pre-buffer filled");
+      this->spk_task_handle_ = nullptr;
       return;
     }
     vTaskDelay(pdMS_TO_TICKS(5));
@@ -82,12 +85,12 @@ void WyomingTcpClient::spk_task_loop_() {
       this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
       // Use blocking play with 10ms timeout to apply backpressure
       this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
-    } else if (available > 0 && this->state_ == State::IDLE) {
+    } else if (available > 0 && this->audio_done_) {
       // Flush remaining data at end of session
       this->spk_buffer_->read((void *) buf, available, 0);
       this->speaker_->play(buf, available, pdMS_TO_TICKS(10));
-    } else if (this->state_ == State::IDLE && available == 0) {
-      // Done
+    } else if (this->audio_done_ && available == 0) {
+      // All audio played
       break;
     } else {
       // No data yet — wait briefly
@@ -96,6 +99,7 @@ void WyomingTcpClient::spk_task_loop_() {
   }
 
   ESP_LOGI(TAG, "Speaker task: playback complete");
+  this->spk_task_handle_ = nullptr;  // Signal net_task we're done
 }
 
 void WyomingTcpClient::start() {
@@ -257,9 +261,12 @@ void WyomingTcpClient::net_task_loop_() {
 
   static uint8_t chunk[1024];
 
+  this->audio_done_ = false;
+
   // Phase 3: Main loop
-  while (this->state_ == State::STREAMING ||
-         this->state_ == State::RECEIVING) {
+  while (!this->audio_done_ &&
+         (this->state_ == State::STREAMING ||
+          this->state_ == State::RECEIVING)) {
 
     if (this->state_ == State::STREAMING) {
       // Drain mic_buffer_ in 1024-byte chunks
@@ -289,6 +296,20 @@ void WyomingTcpClient::net_task_loop_() {
   this->send_audio_stop_();
   this->disconnect_();
   this->mic_source_->stop();
+
+  // Wait for speaker task to finish draining audio
+  if (this->spk_task_handle_ != nullptr) {
+    ESP_LOGI(TAG, "Waiting for speaker to finish...");
+    // spk_task_ checks state_ == IDLE and spk_buffer empty, then exits
+    int timeout = 500;  // 5 seconds max
+    while (this->spk_task_handle_ != nullptr && timeout-- > 0) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (timeout <= 0) {
+      ESP_LOGW(TAG, "Speaker task did not finish in time");
+    }
+  }
+
   this->state_ = State::IDLE;
   ESP_LOGI(TAG, "Session ended");
 }
@@ -430,9 +451,8 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
     }
 
   } else if (type == "audio-stop") {
-    ESP_LOGI(TAG, "Received audio-stop, signaling IDLE for speaker drain");
-    this->state_ = State::IDLE;
-    this->spk_task_handle_ = nullptr;  // Task will self-delete
+    ESP_LOGI(TAG, "Received audio-stop");
+    this->audio_done_ = true;
 
   } else if (type == "transcript") {
     ESP_LOGI(TAG, "Transcript: %s", data_json.c_str());

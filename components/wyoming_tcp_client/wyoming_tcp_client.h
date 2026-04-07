@@ -58,6 +58,7 @@ class WyomingTcpClient : public Component {
 
   bool speaker_started_{false};
   bool speaker_stopping_{false};
+  std::atomic<bool> audio_done_{false};
 
   // FreeRTOS task handles
   TaskHandle_t net_task_handle_{nullptr};
