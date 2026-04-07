@@ -17,7 +17,7 @@ void WyomingTcpClient::setup() {
            this->host_.c_str(), this->port_);
 
   this->mic_buffer_ = RingBuffer::create(16384);  // ~500ms at 16kHz 16-bit
-  this->spk_buffer_ = RingBuffer::create(32768);  // ~1s response buffer
+  this->spk_buffer_ = RingBuffer::create(65536);  // ~2s response buffer at 16kHz
 
   // Register microphone callback
   this->mic_source_->add_data_callback(
@@ -44,13 +44,14 @@ void WyomingTcpClient::loop() {
       ESP_LOGI(TAG, "Speaker started (16kHz/16-bit/mono, resampler handles conversion)");
     }
 
-    uint8_t buf[1024];
+    // Feed speaker in small chunks to avoid overwhelming it
+    uint8_t buf[512];
     size_t available = this->spk_buffer_->available();
-    while (available > 0) {
+    // Only play one chunk per loop() call to avoid watchdog/stack issues
+    if (available > 0) {
       size_t to_read = std::min(available, sizeof(buf));
       this->spk_buffer_->read((void *) buf, to_read, 0);
       this->speaker_->play(buf, to_read);
-      available = this->spk_buffer_->available();
     }
   }
 
