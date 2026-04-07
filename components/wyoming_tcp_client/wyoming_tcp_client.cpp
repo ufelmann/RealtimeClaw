@@ -78,47 +78,19 @@ void WyomingTcpClient::spk_task_loop_() {
   this->speaker_started_ = true;
   ESP_LOGI(TAG, "Speaker task: started after pre-buffering");
 
-  // Continuously feed speaker from ring buffer
-  // Input: 16kHz 16-bit mono, Output: 48kHz 16-bit stereo
-  // Read 256 bytes (128 samples) → produce 128*3*2 = 768 samples = 1536 bytes
-  uint8_t in_buf[256];
-  static int16_t out_buf[128 * 3 * 2];
+  // Continuously feed speaker from ring buffer — no resampling
+  // Data comes in at the speaker's native format (set by RealtimeClaw)
+  uint8_t buf[2048];
 
   while (true) {
     size_t available = this->spk_buffer_->available();
 
-    if (available >= sizeof(in_buf)) {
-      this->spk_buffer_->read((void *) in_buf, sizeof(in_buf), 0);
-
-      // Resample 16kHz mono → 48kHz stereo
-      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
-      size_t out_idx = 0;
-      for (size_t i = 0; i < 128; i++) {
-        int16_t s = in[i];
-        for (int r = 0; r < 3; r++) {
-          out_buf[out_idx++] = s;  // L
-          out_buf[out_idx++] = s;  // R
-        }
-      }
-
-      // Blocking play — wait up to 50ms for space in speaker ring buffer
-      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
-                           out_idx * sizeof(int16_t), pdMS_TO_TICKS(50));
+    if (available >= sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
+      this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(50));
     } else if (available > 0 && this->audio_done_) {
-      // Flush remaining — simplified, just play what's left
-      this->spk_buffer_->read((void *) in_buf, available, 0);
-      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
-      size_t samples_in = available / 2;
-      size_t out_idx = 0;
-      for (size_t i = 0; i < samples_in; i++) {
-        int16_t s = in[i];
-        for (int r = 0; r < 3; r++) {
-          out_buf[out_idx++] = s;
-          out_buf[out_idx++] = s;
-        }
-      }
-      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
-                           out_idx * sizeof(int16_t), pdMS_TO_TICKS(50));
+      this->spk_buffer_->read((void *) buf, available, 0);
+      this->speaker_->play(buf, available, pdMS_TO_TICKS(50));
     } else if (this->audio_done_ && available == 0) {
       break;
     } else {
