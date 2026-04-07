@@ -262,14 +262,12 @@ void WyomingTcpClient::net_task_loop_() {
 
   this->audio_done_ = false;
 
-  // Phase 3: Main loop
-  while (!this->audio_done_ &&
-         (this->state_ == State::STREAMING ||
-          this->state_ == State::RECEIVING)) {
+  // Phase 3: Main loop — stays open for multi-turn conversation
+  while (this->state_ != State::IDLE &&
+         this->state_ != State::ERROR) {
 
     if (this->state_ == State::STREAMING) {
       // Drain mic_buffer_ in 1024-byte chunks
-      size_t chunks_sent = 0;
       while (this->mic_buffer_->available() >= sizeof(chunk)) {
         this->mic_buffer_->read((void *) chunk, sizeof(chunk), 0);
         if (!this->send_event_("audio-chunk",
@@ -279,12 +277,14 @@ void WyomingTcpClient::net_task_loop_() {
           this->state_ = State::ERROR;
           break;
         }
-        chunks_sent++;
       }
-      if (chunks_sent > 0) {
-        ESP_LOGD(TAG, "Sent %zu audio chunks (%zu bytes buffered)",
-                 chunks_sent, this->mic_buffer_->available());
-      }
+    }
+
+    // After response audio finishes, resume streaming mic audio
+    if (this->audio_done_) {
+      this->audio_done_ = false;
+      this->state_ = State::STREAMING;
+      ESP_LOGI(TAG, "Response done, resuming mic streaming for next turn");
     }
 
     this->receive_events_();
