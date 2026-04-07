@@ -30,43 +30,45 @@ void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Ready, waiting for wake word");
 }
 
+// Pre-buffer threshold: 100ms of 16kHz mono 16-bit = 3200 bytes
+// This prevents DMA underflow clicks when speaker starts
+static const size_t PRE_BUFFER_BYTES = 3200;
+
 void WyomingTcpClient::loop() {
   // Play received audio from speaker buffer
-  // Input: 16kHz 16-bit signed LE mono PCM
-  // Output: 48kHz 16-bit stereo for I2S speaker (driver handles 16→32 bit I2S slots)
-  if (this->spk_buffer_->available() > 0) {
-    if (!this->speaker_started_) {
-      // Tell I2S driver: 16-bit samples, stereo, 48kHz
-      audio::AudioStreamInfo stream_info(16, 2, 48000);
-      this->speaker_->set_audio_stream_info(stream_info);
-      this->speaker_->start();
-      this->speaker_started_ = true;
-      ESP_LOGI(TAG, "Speaker started (48kHz/16-bit/stereo)");
+  // Input: 16kHz 16-bit signed LE mono PCM from xAI
+  // Speaker (resampling_speaker) handles upsampling to 48kHz
+  size_t available = this->spk_buffer_->available();
+
+  if (available > 0 && !this->speaker_started_) {
+    // Wait until we have enough data to prevent underruns
+    if (available < PRE_BUFFER_BYTES) {
+      return;  // Keep buffering
     }
+    // Enough data — start speaker
+    audio::AudioStreamInfo stream_info(16, 1, 16000);
+    this->speaker_->set_audio_stream_info(stream_info);
+    this->speaker_->start();
+    this->speaker_started_ = true;
+    ESP_LOGI(TAG, "Speaker started after pre-buffering %zu bytes", available);
+  }
 
-    // Resample in-place: read 16kHz mono, write 48kHz stereo (16-bit)
-    // 128 input samples (256 bytes) → 128*3*2 = 768 output samples (1536 bytes)
-    uint8_t in_buf[256];
-    static int16_t out_buf[128 * 3 * 2];
-
-    int max_chunks = 8;
-    while (max_chunks-- > 0 && this->spk_buffer_->available() >= sizeof(in_buf)) {
-      this->spk_buffer_->read((void *) in_buf, sizeof(in_buf), 0);
-
-      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
-      size_t out_idx = 0;
-
-      for (size_t i = 0; i < 128; i++) {
-        int16_t s = in[i];
-        // 3x repeat (16→48kHz), stereo duplicate
-        for (int r = 0; r < 3; r++) {
-          out_buf[out_idx++] = s;  // L
-          out_buf[out_idx++] = s;  // R
-        }
+  if (this->speaker_started_ && available > 0) {
+    // Feed as much as possible per loop() to keep the pipeline full
+    uint8_t buf[1024];
+    while (this->spk_buffer_->available() >= sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
+      size_t written = this->speaker_->play(buf, sizeof(buf));
+      if (written == 0) {
+        // Speaker ring buffer full — try again next loop
+        break;
       }
-
-      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
-                           out_idx * sizeof(int16_t));
+    }
+    // Flush any remaining partial chunk
+    size_t remaining = this->spk_buffer_->available();
+    if (remaining > 0 && remaining < sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, remaining, 0);
+      this->speaker_->play(buf, remaining);
     }
   }
 
