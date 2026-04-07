@@ -57,6 +57,7 @@ class WyomingTcpClient : public Component {
   std::shared_ptr<RingBuffer> spk_buffer_;
 
   bool speaker_started_{false};
+  bool speaker_stopping_{false};
 
   // FreeRTOS task handles
   TaskHandle_t net_task_handle_{nullptr};

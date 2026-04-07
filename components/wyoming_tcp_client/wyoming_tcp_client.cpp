@@ -55,12 +55,19 @@ void WyomingTcpClient::loop() {
     }
   }
 
-  // Stop speaker when session ended and buffer drained
+  // Stop speaker when session ended, buffer drained, and speaker finished
   if (this->speaker_started_ && this->state_ == State::IDLE &&
       this->spk_buffer_->available() == 0) {
-    this->speaker_->stop();
-    this->speaker_started_ = false;
-    ESP_LOGI(TAG, "Speaker stopped");
+    // Give the speaker time to finish playing its internal buffer
+    if (this->speaker_->is_stopped()) {
+      this->speaker_started_ = false;
+      ESP_LOGI(TAG, "Speaker finished");
+    } else if (!this->speaker_stopping_) {
+      // Request stop but don't force it
+      this->speaker_->stop();
+      this->speaker_stopping_ = true;
+      ESP_LOGI(TAG, "Speaker stop requested");
+    }
   }
 }
 
@@ -72,6 +79,7 @@ void WyomingTcpClient::start() {
 
   ESP_LOGI(TAG, "Starting session");
   this->state_ = State::CONNECTING;
+  this->speaker_stopping_ = false;
 
   // Launch network task on Core 1
   xTaskCreatePinnedToCore(WyomingTcpClient::net_task_, "wyoming_net",
