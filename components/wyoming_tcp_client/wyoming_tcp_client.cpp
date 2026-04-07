@@ -83,7 +83,14 @@ void WyomingTcpClient::spk_task_loop_() {
 
     if (available >= sizeof(buf)) {
       this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      // Use blocking play with 10ms timeout to apply backpressure
+      // Amplify audio (xAI output is quiet through resampler)
+      int16_t *samples = reinterpret_cast<int16_t *>(buf);
+      for (size_t i = 0; i < sizeof(buf) / 2; i++) {
+        int32_t amplified = static_cast<int32_t>(samples[i]) * 4;
+        if (amplified > 32767) amplified = 32767;
+        if (amplified < -32768) amplified = -32768;
+        samples[i] = static_cast<int16_t>(amplified);
+      }
       this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
     } else if (available > 0 && this->audio_done_) {
       // Flush remaining data at end of session
