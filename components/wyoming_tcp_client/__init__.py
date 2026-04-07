@@ -3,7 +3,9 @@ import esphome.config_validation as cv
 from esphome import automation
 from esphome.automation import maybe_simple_id
 from esphome.components import microphone, speaker
-from esphome.const import CONF_ID, CONF_HOST, CONF_PORT
+from esphome.const import CONF_ID, CONF_PORT
+
+CONF_HOST = "host"
 
 DEPENDENCIES = ["microphone"]
 AUTO_LOAD = []
