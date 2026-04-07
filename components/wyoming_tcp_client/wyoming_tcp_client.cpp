@@ -30,49 +30,12 @@ void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Ready, waiting for wake word");
 }
 
-// Pre-buffer threshold: 100ms of 16kHz mono 16-bit = 3200 bytes
-// This prevents DMA underflow clicks when speaker starts
-static const size_t PRE_BUFFER_BYTES = 3200;
+// Pre-buffer threshold: 200ms of 16kHz mono 16-bit = 6400 bytes
+static const size_t PRE_BUFFER_BYTES = 6400;
 
 void WyomingTcpClient::loop() {
-  // Play received audio from speaker buffer
-  // Input: 16kHz 16-bit signed LE mono PCM from xAI
-  // Speaker (resampling_speaker) handles upsampling to 48kHz
-  size_t available = this->spk_buffer_->available();
-
-  if (available > 0 && !this->speaker_started_) {
-    // Wait until we have enough data to prevent underruns
-    if (available < PRE_BUFFER_BYTES) {
-      return;  // Keep buffering
-    }
-    // Enough data — start speaker
-    audio::AudioStreamInfo stream_info(16, 1, 16000);
-    this->speaker_->set_audio_stream_info(stream_info);
-    this->speaker_->start();
-    this->speaker_started_ = true;
-    ESP_LOGI(TAG, "Speaker started after pre-buffering %zu bytes", available);
-  }
-
-  if (this->speaker_started_ && available > 0) {
-    // Feed as much as possible per loop() to keep the pipeline full
-    uint8_t buf[1024];
-    while (this->spk_buffer_->available() >= sizeof(buf)) {
-      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      size_t written = this->speaker_->play(buf, sizeof(buf));
-      if (written == 0) {
-        // Speaker ring buffer full — try again next loop
-        break;
-      }
-    }
-    // Flush any remaining partial chunk
-    size_t remaining = this->spk_buffer_->available();
-    if (remaining > 0 && remaining < sizeof(buf)) {
-      this->spk_buffer_->read((void *) buf, remaining, 0);
-      this->speaker_->play(buf, remaining);
-    }
-  }
-
-  // Stop speaker when session ended and buffer drained
+  // Speaker is driven by spk_task_, not loop()
+  // Just handle speaker lifecycle
   if (this->speaker_started_ && this->state_ == State::IDLE &&
       this->spk_buffer_->available() == 0) {
     if (this->speaker_->is_stopped()) {
@@ -84,6 +47,55 @@ void WyomingTcpClient::loop() {
       ESP_LOGI(TAG, "Speaker stop requested");
     }
   }
+}
+
+void WyomingTcpClient::spk_task_(void *param) {
+  auto *self = static_cast<WyomingTcpClient *>(param);
+  self->spk_task_loop_();
+  vTaskDelete(nullptr);
+}
+
+void WyomingTcpClient::spk_task_loop_() {
+  // Wait for pre-buffer threshold
+  ESP_LOGI(TAG, "Speaker task: waiting for %zu bytes pre-buffer", PRE_BUFFER_BYTES);
+  while (this->spk_buffer_->available() < PRE_BUFFER_BYTES) {
+    if (this->state_ == State::IDLE || this->state_ == State::ERROR) {
+      ESP_LOGI(TAG, "Speaker task: session ended before pre-buffer filled");
+      return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+
+  // Start speaker
+  audio::AudioStreamInfo stream_info(16, 1, 16000);
+  this->speaker_->set_audio_stream_info(stream_info);
+  this->speaker_->start();
+  this->speaker_started_ = true;
+  ESP_LOGI(TAG, "Speaker task: started after pre-buffering");
+
+  // Continuously feed speaker from ring buffer
+  uint8_t buf[1024];
+  while (true) {
+    size_t available = this->spk_buffer_->available();
+
+    if (available >= sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
+      // Use blocking play with 10ms timeout to apply backpressure
+      this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
+    } else if (available > 0 && this->state_ == State::IDLE) {
+      // Flush remaining data at end of session
+      this->spk_buffer_->read((void *) buf, available, 0);
+      this->speaker_->play(buf, available, pdMS_TO_TICKS(10));
+    } else if (this->state_ == State::IDLE && available == 0) {
+      // Done
+      break;
+    } else {
+      // No data yet — wait briefly
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
+
+  ESP_LOGI(TAG, "Speaker task: playback complete");
 }
 
 void WyomingTcpClient::start() {
@@ -404,6 +416,11 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
   if (type == "audio-start") {
     ESP_LOGI(TAG, "Received audio-start, switching to RECEIVING");
     this->state_ = State::RECEIVING;
+    // Launch speaker task to handle playback from spk_buffer_
+    if (this->spk_task_handle_ == nullptr) {
+      xTaskCreatePinnedToCore(WyomingTcpClient::spk_task_, "wyoming_spk",
+                              4096, this, 10, &this->spk_task_handle_, 0);
+    }
 
   } else if (type == "audio-chunk") {
     if (!payload.empty()) {
@@ -413,9 +430,9 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
     }
 
   } else if (type == "audio-stop") {
-    ESP_LOGI(TAG, "Received audio-stop, draining speaker then going IDLE");
-    vTaskDelay(pdMS_TO_TICKS(500));
+    ESP_LOGI(TAG, "Received audio-stop, signaling IDLE for speaker drain");
     this->state_ = State::IDLE;
+    this->spk_task_handle_ = nullptr;  // Task will self-delete
 
   } else if (type == "transcript") {
     ESP_LOGI(TAG, "Transcript: %s", data_json.c_str());

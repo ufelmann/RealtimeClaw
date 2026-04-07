@@ -61,6 +61,10 @@ class WyomingTcpClient : public Component {
 
   // FreeRTOS task handles
   TaskHandle_t net_task_handle_{nullptr};
+  TaskHandle_t spk_task_handle_{nullptr};
+
+  static void spk_task_(void *param);
+  void spk_task_loop_();
 
   // Wyoming protocol helpers
   bool send_event_(const char *type, const char *data_json = nullptr,
