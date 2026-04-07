@@ -17,7 +17,7 @@ void WyomingTcpClient::setup() {
            this->host_.c_str(), this->port_);
 
   this->mic_buffer_ = RingBuffer::create(16384);  // ~500ms at 16kHz 16-bit
-  this->spk_buffer_ = RingBuffer::create(65536);  // ~2s response buffer at 16kHz
+  this->spk_buffer_ = RingBuffer::create(256000);  // ~8s response buffer at 16kHz
 
   // Register microphone callback
   this->mic_source_->add_data_callback(
@@ -444,9 +444,14 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
 
   } else if (type == "audio-chunk") {
     if (!payload.empty()) {
-      this->spk_buffer_->write(
-          const_cast<void *>(reinterpret_cast<const void *>(payload.data())),
-          payload.size());
+      size_t free = this->spk_buffer_->free();
+      if (free >= payload.size()) {
+        this->spk_buffer_->write(
+            const_cast<void *>(reinterpret_cast<const void *>(payload.data())),
+            payload.size());
+      } else {
+        ESP_LOGW(TAG, "Speaker buffer full, dropping %zu bytes", payload.size());
+      }
     }
 
   } else if (type == "audio-stop") {
