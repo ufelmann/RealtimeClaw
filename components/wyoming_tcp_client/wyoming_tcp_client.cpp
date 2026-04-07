@@ -17,7 +17,7 @@ void WyomingTcpClient::setup() {
            this->host_.c_str(), this->port_);
 
   this->mic_buffer_ = RingBuffer::create(16384);  // ~500ms at 16kHz 16-bit
-  this->spk_buffer_ = RingBuffer::create(65536);  // ~2s response buffer at 16kHz
+  this->spk_buffer_ = RingBuffer::create(131072);  // ~4s response buffer at 16kHz
 
   // Register microphone callback
   this->mic_source_->add_data_callback(
@@ -30,9 +30,9 @@ void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Ready, waiting for wake word");
 }
 
-// Pre-buffer threshold: 50ms of 16kHz mono 16-bit = 1600 bytes
-// Keep small to minimize initial delay, speaker's own ring buffer handles the rest
-static const size_t PRE_BUFFER_BYTES = 1600;
+// Pre-buffer threshold: 500ms of 16kHz mono 16-bit = 16000 bytes
+// Needs to be large enough to absorb xAI burst delivery pattern
+static const size_t PRE_BUFFER_BYTES = 16000;
 
 void WyomingTcpClient::loop() {
   // Speaker is driven by spk_task_, not loop()
@@ -100,8 +100,11 @@ void WyomingTcpClient::spk_task_loop_() {
     } else if (this->audio_done_ && available == 0) {
       // All audio played
       break;
+    } else if (available == 0 && !this->audio_done_) {
+      // Buffer temporarily empty — xAI sends in bursts
+      // Wait longer to avoid speaker underrun
+      vTaskDelay(pdMS_TO_TICKS(20));
     } else {
-      // No data yet — wait briefly
       vTaskDelay(pdMS_TO_TICKS(2));
     }
   }
