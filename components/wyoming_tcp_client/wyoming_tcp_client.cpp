@@ -17,7 +17,7 @@ void WyomingTcpClient::setup() {
            this->host_.c_str(), this->port_);
 
   this->mic_buffer_ = RingBuffer::create(16384);  // ~500ms at 16kHz 16-bit
-  this->spk_buffer_ = RingBuffer::create(131072);  // ~4s response buffer at 16kHz
+  this->spk_buffer_ = RingBuffer::create(65536);  // ~2s response buffer at 16kHz
 
   // Register microphone callback
   this->mic_source_->add_data_callback(
@@ -30,9 +30,9 @@ void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Ready, waiting for wake word");
 }
 
-// Pre-buffer threshold: 500ms of 16kHz mono 16-bit = 16000 bytes
-// Needs to be large enough to absorb xAI burst delivery pattern
-static const size_t PRE_BUFFER_BYTES = 16000;
+// Pre-buffer threshold: 100ms of 16kHz mono 16-bit = 3200 bytes
+// RealtimeClaw now paces audio delivery at 32ms/chunk, so less buffering needed
+static const size_t PRE_BUFFER_BYTES = 3200;
 
 void WyomingTcpClient::loop() {
   // Speaker is driven by spk_task_, not loop()
@@ -84,14 +84,6 @@ void WyomingTcpClient::spk_task_loop_() {
 
     if (available >= sizeof(buf)) {
       this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      // Amplify audio (xAI output is quiet through resampler)
-      int16_t *samples = reinterpret_cast<int16_t *>(buf);
-      for (size_t i = 0; i < sizeof(buf) / 2; i++) {
-        int32_t amplified = static_cast<int32_t>(samples[i]) * 2;
-        if (amplified > 32767) amplified = 32767;
-        if (amplified < -32768) amplified = -32768;
-        samples[i] = static_cast<int16_t>(amplified);
-      }
       this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
     } else if (available > 0 && this->audio_done_) {
       // Flush remaining data at end of session
