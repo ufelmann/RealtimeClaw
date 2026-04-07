@@ -195,10 +195,12 @@ void WyomingTcpClient::net_task_loop_() {
     return;
   }
 
-  // Phase 2: Transition to STREAMING
+  // Phase 2: Start mic, transition to STREAMING
+  this->mic_source_->start();
   this->state_ = State::STREAMING;
   this->speaker_->start();
   this->send_audio_start_();
+  ESP_LOGI(TAG, "Streaming audio to %s:%d", this->host_.c_str(), this->port_);
 
   static uint8_t chunk[1024];
 
@@ -208,11 +210,21 @@ void WyomingTcpClient::net_task_loop_() {
 
     if (this->state_ == State::STREAMING) {
       // Drain mic_buffer_ in 1024-byte chunks
+      size_t chunks_sent = 0;
       while (this->mic_buffer_->available() >= sizeof(chunk)) {
         this->mic_buffer_->read((void *) chunk, sizeof(chunk), 0);
-        this->send_event_("audio-chunk",
+        if (!this->send_event_("audio-chunk",
                           "{\"rate\":16000,\"width\":2,\"channels\":1}",
-                          chunk, sizeof(chunk));
+                          chunk, sizeof(chunk))) {
+          ESP_LOGE(TAG, "Failed to send audio chunk");
+          this->state_ = State::ERROR;
+          break;
+        }
+        chunks_sent++;
+      }
+      if (chunks_sent > 0) {
+        ESP_LOGD(TAG, "Sent %zu audio chunks (%zu bytes buffered)",
+                 chunks_sent, this->mic_buffer_->available());
       }
     }
 
@@ -223,8 +235,10 @@ void WyomingTcpClient::net_task_loop_() {
   // Phase 4: Cleanup
   this->send_audio_stop_();
   this->disconnect_();
+  this->mic_source_->stop();
   this->speaker_->stop();
   this->state_ = State::IDLE;
+  ESP_LOGI(TAG, "Session ended");
 }
 
 bool WyomingTcpClient::receive_events_() {
