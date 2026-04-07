@@ -59,6 +59,8 @@ class WyomingTcpClient : public Component {
   bool speaker_started_{false};
   bool speaker_stopping_{false};
   std::atomic<bool> audio_done_{false};
+  uint32_t last_activity_ms_{0};  // millis() of last speech/response
+  static const uint32_t SESSION_TIMEOUT_MS = 15000;  // 15s idle → close
 
   // FreeRTOS task handles
   TaskHandle_t net_task_handle_{nullptr};

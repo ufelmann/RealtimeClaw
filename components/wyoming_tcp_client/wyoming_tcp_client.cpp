@@ -261,6 +261,7 @@ void WyomingTcpClient::net_task_loop_() {
   static uint8_t chunk[1024];
 
   this->audio_done_ = false;
+  this->last_activity_ms_ = millis();
 
   // Phase 3: Main loop — stays open for multi-turn conversation
   while (this->state_ != State::IDLE &&
@@ -278,12 +279,19 @@ void WyomingTcpClient::net_task_loop_() {
           break;
         }
       }
+
+      // Check idle timeout — close session if no activity for 15s
+      if (millis() - this->last_activity_ms_ > SESSION_TIMEOUT_MS) {
+        ESP_LOGI(TAG, "Session idle for %lums, closing", SESSION_TIMEOUT_MS);
+        break;
+      }
     }
 
     // After response audio finishes, resume streaming mic audio
     if (this->audio_done_) {
       this->audio_done_ = false;
       this->state_ = State::STREAMING;
+      this->last_activity_ms_ = millis();  // Reset timeout after response
       ESP_LOGI(TAG, "Response done, resuming mic streaming for next turn");
     }
 
@@ -436,6 +444,7 @@ void WyomingTcpClient::handle_received_event_(const std::string &type,
   if (type == "audio-start") {
     ESP_LOGI(TAG, "Received audio-start, switching to RECEIVING");
     this->state_ = State::RECEIVING;
+    this->last_activity_ms_ = millis();
     // Launch speaker task to handle playback from spk_buffer_
     if (this->spk_task_handle_ == nullptr) {
       xTaskCreatePinnedToCore(WyomingTcpClient::spk_task_, "wyoming_spk",
