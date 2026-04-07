@@ -70,27 +70,26 @@ void WyomingTcpClient::spk_task_loop_() {
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 
-  // Start speaker — output 16-bit stereo 48kHz
-  // I2S driver expands 16-bit to 32-bit slots automatically
-  audio::AudioStreamInfo stream_info(16, 2, 48000);
+  // Start speaker — 16kHz mono 16-bit, resampler handles conversion to 48kHz
+  audio::AudioStreamInfo stream_info(16, 1, 16000);
   this->speaker_->set_audio_stream_info(stream_info);
   this->speaker_->start();
   this->speaker_started_ = true;
   ESP_LOGI(TAG, "Speaker task: started after pre-buffering");
 
-  // Continuously feed speaker from ring buffer — no resampling
-  // Data comes in at the speaker's native format (set by RealtimeClaw)
-  uint8_t buf[2048];
+  // Continuously feed speaker from ring buffer
+  // 16kHz mono 16-bit PCM → announcement_resampling_speaker handles 48kHz conversion
+  uint8_t buf[1024];
 
   while (true) {
     size_t available = this->spk_buffer_->available();
 
     if (available >= sizeof(buf)) {
       this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(50));
+      this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
     } else if (available > 0 && this->audio_done_) {
       this->spk_buffer_->read((void *) buf, available, 0);
-      this->speaker_->play(buf, available, pdMS_TO_TICKS(50));
+      this->speaker_->play(buf, available, pdMS_TO_TICKS(10));
     } else if (this->audio_done_ && available == 0) {
       break;
     } else {
