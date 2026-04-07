@@ -44,14 +44,12 @@ void WyomingTcpClient::loop() {
       ESP_LOGI(TAG, "Speaker started (16kHz/16-bit/mono, resampler handles conversion)");
     }
 
-    // Feed speaker in small chunks to avoid overwhelming it
-    uint8_t buf[512];
-    size_t available = this->spk_buffer_->available();
-    // Only play one chunk per loop() call to avoid watchdog/stack issues
-    if (available > 0) {
-      size_t to_read = std::min(available, sizeof(buf));
-      this->spk_buffer_->read((void *) buf, to_read, 0);
-      this->speaker_->play(buf, to_read);
+    // Feed speaker in chunks — up to 4KB per loop() to keep audio smooth
+    uint8_t buf[1024];
+    int max_chunks = 4;  // up to 4KB per loop iteration
+    while (max_chunks-- > 0 && this->spk_buffer_->available() >= sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
+      this->speaker_->play(buf, sizeof(buf));
     }
   }
 
