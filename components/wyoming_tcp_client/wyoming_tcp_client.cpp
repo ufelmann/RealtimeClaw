@@ -30,8 +30,9 @@ void WyomingTcpClient::setup() {
   ESP_LOGI(TAG, "Ready, waiting for wake word");
 }
 
-// Pre-buffer threshold: 200ms of 16kHz mono 16-bit = 6400 bytes
-static const size_t PRE_BUFFER_BYTES = 6400;
+// Pre-buffer threshold: 50ms of 16kHz mono 16-bit = 1600 bytes
+// Keep small to minimize initial delay, speaker's own ring buffer handles the rest
+static const size_t PRE_BUFFER_BYTES = 1600;
 
 void WyomingTcpClient::loop() {
   // Speaker is driven by spk_task_, not loop()
@@ -86,7 +87,7 @@ void WyomingTcpClient::spk_task_loop_() {
       // Amplify audio (xAI output is quiet through resampler)
       int16_t *samples = reinterpret_cast<int16_t *>(buf);
       for (size_t i = 0; i < sizeof(buf) / 2; i++) {
-        int32_t amplified = static_cast<int32_t>(samples[i]) * 4;
+        int32_t amplified = static_cast<int32_t>(samples[i]) * 2;
         if (amplified > 32767) amplified = 32767;
         if (amplified < -32768) amplified = -32768;
         samples[i] = static_cast<int16_t>(amplified);
