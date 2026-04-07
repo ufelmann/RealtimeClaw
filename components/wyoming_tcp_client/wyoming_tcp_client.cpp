@@ -31,33 +31,52 @@ void WyomingTcpClient::setup() {
 }
 
 void WyomingTcpClient::loop() {
-  // Play any received audio from speaker buffer
-  // Input: 16kHz 16-bit signed LE mono PCM from xAI via RealtimeClaw
-  // The speaker handles resampling/format conversion via set_audio_stream_info
+  // Play received audio from speaker buffer
+  // Input: 16kHz 16-bit signed LE mono PCM from xAI
+  // Output: 48kHz 32-bit stereo for AIC3204 codec (I2S master at 48kHz)
   if (this->spk_buffer_->available() > 0) {
     if (!this->speaker_started_) {
-      // Tell the speaker the format of our incoming audio
-      audio::AudioStreamInfo stream_info(16, 1, 16000);  // 16-bit, mono, 16kHz
+      audio::AudioStreamInfo stream_info(32, 2, 48000);
       this->speaker_->set_audio_stream_info(stream_info);
       this->speaker_->start();
       this->speaker_started_ = true;
+      ESP_LOGI(TAG, "Speaker started (48kHz/32-bit/stereo)");
     }
 
-    uint8_t buf[1024];
-    size_t available = this->spk_buffer_->available();
-    while (available > 0) {
-      size_t to_read = std::min(available, sizeof(buf));
-      this->spk_buffer_->read((void *) buf, to_read, 0);
-      this->speaker_->play(buf, to_read);
-      available = this->spk_buffer_->available();
+    // Process 128 input samples (256 bytes) at a time
+    // Output: 128 * 3 (upsample) * 2 (stereo) * 4 (32-bit) = 3072 bytes
+    uint8_t in_buf[256];
+    while (this->spk_buffer_->available() >= sizeof(in_buf)) {
+      this->spk_buffer_->read((void *) in_buf, sizeof(in_buf), 0);
+
+      int16_t *samples_in = reinterpret_cast<int16_t *>(in_buf);
+      size_t num_samples = sizeof(in_buf) / 2;  // 128 samples
+
+      // 128 input samples → 128*3*2 = 768 output samples (32-bit each)
+      static int32_t out_buf[128 * 3 * 2];
+      size_t out_idx = 0;
+
+      for (size_t i = 0; i < num_samples; i++) {
+        // 16-bit → 32-bit: shift left 16 (MSB-aligned)
+        int32_t s32 = static_cast<int32_t>(samples_in[i]) << 16;
+        // 3x repeat for 16kHz→48kHz, stereo duplicate
+        for (int r = 0; r < 3; r++) {
+          out_buf[out_idx++] = s32;  // L
+          out_buf[out_idx++] = s32;  // R
+        }
+      }
+
+      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
+                           out_idx * sizeof(int32_t));
     }
   }
 
-  // Stop speaker when done receiving and buffer drained
+  // Stop speaker when session ended and buffer drained
   if (this->speaker_started_ && this->state_ == State::IDLE &&
       this->spk_buffer_->available() == 0) {
     this->speaker_->stop();
     this->speaker_started_ = false;
+    ESP_LOGI(TAG, "Speaker stopped");
   }
 }
 
