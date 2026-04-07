@@ -70,34 +70,59 @@ void WyomingTcpClient::spk_task_loop_() {
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 
-  // Start speaker
-  audio::AudioStreamInfo stream_info(16, 1, 16000);
+  // Start speaker — output 16-bit stereo 48kHz
+  // I2S driver expands 16-bit to 32-bit slots automatically
+  audio::AudioStreamInfo stream_info(16, 2, 48000);
   this->speaker_->set_audio_stream_info(stream_info);
   this->speaker_->start();
   this->speaker_started_ = true;
   ESP_LOGI(TAG, "Speaker task: started after pre-buffering");
 
   // Continuously feed speaker from ring buffer
-  uint8_t buf[1024];
+  // Input: 16kHz 16-bit mono, Output: 48kHz 16-bit stereo
+  // Read 256 bytes (128 samples) → produce 128*3*2 = 768 samples = 1536 bytes
+  uint8_t in_buf[256];
+  static int16_t out_buf[128 * 3 * 2];
+
   while (true) {
     size_t available = this->spk_buffer_->available();
 
-    if (available >= sizeof(buf)) {
-      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      this->speaker_->play(buf, sizeof(buf), pdMS_TO_TICKS(10));
+    if (available >= sizeof(in_buf)) {
+      this->spk_buffer_->read((void *) in_buf, sizeof(in_buf), 0);
+
+      // Resample 16kHz mono → 48kHz stereo
+      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
+      size_t out_idx = 0;
+      for (size_t i = 0; i < 128; i++) {
+        int16_t s = in[i];
+        for (int r = 0; r < 3; r++) {
+          out_buf[out_idx++] = s;  // L
+          out_buf[out_idx++] = s;  // R
+        }
+      }
+
+      // Blocking play — wait up to 50ms for space in speaker ring buffer
+      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
+                           out_idx * sizeof(int16_t), pdMS_TO_TICKS(50));
     } else if (available > 0 && this->audio_done_) {
-      // Flush remaining data at end of session
-      this->spk_buffer_->read((void *) buf, available, 0);
-      this->speaker_->play(buf, available, pdMS_TO_TICKS(10));
+      // Flush remaining — simplified, just play what's left
+      this->spk_buffer_->read((void *) in_buf, available, 0);
+      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
+      size_t samples_in = available / 2;
+      size_t out_idx = 0;
+      for (size_t i = 0; i < samples_in; i++) {
+        int16_t s = in[i];
+        for (int r = 0; r < 3; r++) {
+          out_buf[out_idx++] = s;
+          out_buf[out_idx++] = s;
+        }
+      }
+      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
+                           out_idx * sizeof(int16_t), pdMS_TO_TICKS(50));
     } else if (this->audio_done_ && available == 0) {
-      // All audio played
       break;
-    } else if (available == 0 && !this->audio_done_) {
-      // Buffer temporarily empty — xAI sends in bursts
-      // Wait longer to avoid speaker underrun
-      vTaskDelay(pdMS_TO_TICKS(20));
     } else {
-      vTaskDelay(pdMS_TO_TICKS(2));
+      vTaskDelay(pdMS_TO_TICKS(5));
     }
   }
 
