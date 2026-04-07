@@ -32,36 +32,51 @@ void WyomingTcpClient::setup() {
 
 void WyomingTcpClient::loop() {
   // Play received audio from speaker buffer
-  // Input: 16kHz 16-bit signed LE mono PCM from xAI
-  // Speaker (resampling_speaker) handles upsampling to 48kHz
+  // Input: 16kHz 16-bit signed LE mono PCM
+  // Output: 48kHz 16-bit stereo for I2S speaker (driver handles 16→32 bit I2S slots)
   if (this->spk_buffer_->available() > 0) {
     if (!this->speaker_started_) {
-      // Tell the speaker we're sending 16kHz 16-bit mono
-      audio::AudioStreamInfo stream_info(16, 1, 16000);
+      // Tell I2S driver: 16-bit samples, stereo, 48kHz
+      audio::AudioStreamInfo stream_info(16, 2, 48000);
       this->speaker_->set_audio_stream_info(stream_info);
       this->speaker_->start();
       this->speaker_started_ = true;
-      ESP_LOGI(TAG, "Speaker started (16kHz/16-bit/mono, resampler handles conversion)");
+      ESP_LOGI(TAG, "Speaker started (48kHz/16-bit/stereo)");
     }
 
-    // Feed speaker in chunks — up to 4KB per loop() to keep audio smooth
-    uint8_t buf[1024];
-    int max_chunks = 4;  // up to 4KB per loop iteration
-    while (max_chunks-- > 0 && this->spk_buffer_->available() >= sizeof(buf)) {
-      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-      this->speaker_->play(buf, sizeof(buf));
+    // Resample in-place: read 16kHz mono, write 48kHz stereo (16-bit)
+    // 128 input samples (256 bytes) → 128*3*2 = 768 output samples (1536 bytes)
+    uint8_t in_buf[256];
+    static int16_t out_buf[128 * 3 * 2];
+
+    int max_chunks = 8;
+    while (max_chunks-- > 0 && this->spk_buffer_->available() >= sizeof(in_buf)) {
+      this->spk_buffer_->read((void *) in_buf, sizeof(in_buf), 0);
+
+      int16_t *in = reinterpret_cast<int16_t *>(in_buf);
+      size_t out_idx = 0;
+
+      for (size_t i = 0; i < 128; i++) {
+        int16_t s = in[i];
+        // 3x repeat (16→48kHz), stereo duplicate
+        for (int r = 0; r < 3; r++) {
+          out_buf[out_idx++] = s;  // L
+          out_buf[out_idx++] = s;  // R
+        }
+      }
+
+      this->speaker_->play(reinterpret_cast<uint8_t *>(out_buf),
+                           out_idx * sizeof(int16_t));
     }
   }
 
-  // Stop speaker when session ended, buffer drained, and speaker finished
+  // Stop speaker when session ended and buffer drained
   if (this->speaker_started_ && this->state_ == State::IDLE &&
       this->spk_buffer_->available() == 0) {
-    // Give the speaker time to finish playing its internal buffer
     if (this->speaker_->is_stopped()) {
       this->speaker_started_ = false;
       ESP_LOGI(TAG, "Speaker finished");
     } else if (!this->speaker_stopping_) {
-      // Request stop but don't force it
       this->speaker_->stop();
       this->speaker_stopping_ = true;
       ESP_LOGI(TAG, "Speaker stop requested");
