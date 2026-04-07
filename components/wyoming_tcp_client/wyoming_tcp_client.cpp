@@ -32,14 +32,34 @@ void WyomingTcpClient::setup() {
 
 void WyomingTcpClient::loop() {
   // Play any received audio from speaker buffer
+  // Input: 16kHz 16-bit mono PCM from xAI
+  // Output: 48kHz 32-bit stereo PCM for Voice PE speaker
   if (this->state_ == State::RECEIVING ||
       this->spk_buffer_->available() > 0) {
-    uint8_t buf[1024];
+    uint8_t buf[512];  // 256 mono 16-bit samples
     size_t available = this->spk_buffer_->available();
-    while (available > 0) {
-      size_t to_read = std::min(available, sizeof(buf));
-      this->spk_buffer_->read((void *) buf, to_read, 0);
-      this->speaker_->play(buf, to_read);
+    while (available >= sizeof(buf)) {
+      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
+
+      // Resample: 16kHz mono 16-bit → 48kHz stereo 32-bit
+      // Each input sample (2 bytes) becomes 6 output samples (24 bytes):
+      //   3x rate + 2x channels + 2x bit depth
+      static int32_t out[256 * 3 * 2];  // 256 samples * 3 (upsample) * 2 (stereo)
+      int16_t *in = reinterpret_cast<int16_t *>(buf);
+      size_t in_samples = sizeof(buf) / 2;
+      size_t out_idx = 0;
+
+      for (size_t i = 0; i < in_samples; i++) {
+        int32_t sample32 = static_cast<int32_t>(in[i]) << 16;  // 16-bit → 32-bit
+        // 3x upsample (simple sample repeat) + stereo duplicate
+        for (int r = 0; r < 3; r++) {
+          out[out_idx++] = sample32;  // left
+          out[out_idx++] = sample32;  // right
+        }
+      }
+
+      this->speaker_->play(reinterpret_cast<uint8_t *>(out),
+                           out_idx * sizeof(int32_t));
       available = this->spk_buffer_->available();
     }
   }
