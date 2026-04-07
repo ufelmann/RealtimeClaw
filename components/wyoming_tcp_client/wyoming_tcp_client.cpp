@@ -32,36 +32,32 @@ void WyomingTcpClient::setup() {
 
 void WyomingTcpClient::loop() {
   // Play any received audio from speaker buffer
-  // Input: 16kHz 16-bit mono PCM from xAI
-  // Output: 48kHz 32-bit stereo PCM for Voice PE speaker
-  if (this->state_ == State::RECEIVING ||
-      this->spk_buffer_->available() > 0) {
-    uint8_t buf[512];  // 256 mono 16-bit samples
+  // Input: 16kHz 16-bit signed LE mono PCM from xAI via RealtimeClaw
+  // The speaker handles resampling/format conversion via set_audio_stream_info
+  if (this->spk_buffer_->available() > 0) {
+    if (!this->speaker_started_) {
+      // Tell the speaker the format of our incoming audio
+      audio::AudioStreamInfo stream_info(16, 1, 16000);  // 16-bit, mono, 16kHz
+      this->speaker_->set_audio_stream_info(stream_info);
+      this->speaker_->start();
+      this->speaker_started_ = true;
+    }
+
+    uint8_t buf[1024];
     size_t available = this->spk_buffer_->available();
-    while (available >= sizeof(buf)) {
-      this->spk_buffer_->read((void *) buf, sizeof(buf), 0);
-
-      // Resample: 16kHz mono 16-bit → 48kHz stereo 32-bit
-      // Each input sample (2 bytes) becomes 6 output samples (24 bytes):
-      //   3x rate + 2x channels + 2x bit depth
-      static int32_t out[256 * 3 * 2];  // 256 samples * 3 (upsample) * 2 (stereo)
-      int16_t *in = reinterpret_cast<int16_t *>(buf);
-      size_t in_samples = sizeof(buf) / 2;
-      size_t out_idx = 0;
-
-      for (size_t i = 0; i < in_samples; i++) {
-        int32_t sample32 = static_cast<int32_t>(in[i]) << 16;  // 16-bit → 32-bit
-        // 3x upsample (simple sample repeat) + stereo duplicate
-        for (int r = 0; r < 3; r++) {
-          out[out_idx++] = sample32;  // left
-          out[out_idx++] = sample32;  // right
-        }
-      }
-
-      this->speaker_->play(reinterpret_cast<uint8_t *>(out),
-                           out_idx * sizeof(int32_t));
+    while (available > 0) {
+      size_t to_read = std::min(available, sizeof(buf));
+      this->spk_buffer_->read((void *) buf, to_read, 0);
+      this->speaker_->play(buf, to_read);
       available = this->spk_buffer_->available();
     }
+  }
+
+  // Stop speaker when done receiving and buffer drained
+  if (this->speaker_started_ && this->state_ == State::IDLE &&
+      this->spk_buffer_->available() == 0) {
+    this->speaker_->stop();
+    this->speaker_started_ = false;
   }
 }
 
@@ -218,7 +214,6 @@ void WyomingTcpClient::net_task_loop_() {
   // Phase 2: Start mic, transition to STREAMING
   this->mic_source_->start();
   this->state_ = State::STREAMING;
-  this->speaker_->start();
   this->send_audio_start_();
   ESP_LOGI(TAG, "Streaming audio to %s:%d", this->host_.c_str(), this->port_);
 
@@ -256,7 +251,6 @@ void WyomingTcpClient::net_task_loop_() {
   this->send_audio_stop_();
   this->disconnect_();
   this->mic_source_->stop();
-  this->speaker_->stop();
   this->state_ = State::IDLE;
   ESP_LOGI(TAG, "Session ended");
 }

@@ -4,6 +4,7 @@
 #include "esphome/core/component.h"
 #include "esphome/components/microphone/microphone_source.h"
 #include "esphome/components/speaker/speaker.h"
+#include "esphome/components/audio/audio.h"
 #include "esphome/core/ring_buffer.h"
 
 #include <lwip/sockets.h>
@@ -54,6 +55,8 @@ class WyomingTcpClient : public Component {
   // Ring buffers for inter-task communication
   std::shared_ptr<RingBuffer> mic_buffer_;
   std::shared_ptr<RingBuffer> spk_buffer_;
+
+  bool speaker_started_{false};
 
   // FreeRTOS task handles
   TaskHandle_t net_task_handle_{nullptr};

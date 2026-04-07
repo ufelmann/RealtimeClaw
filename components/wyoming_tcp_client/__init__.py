@@ -8,7 +8,7 @@ from esphome.const import CONF_ID, CONF_PORT
 CONF_HOST = "host"
 
 DEPENDENCIES = ["microphone"]
-AUTO_LOAD = []
+AUTO_LOAD = ["audio"]
 
 wyoming_tcp_client_ns = cg.esphome_ns.namespace("wyoming_tcp_client")
 WyomingTcpClient = wyoming_tcp_client_ns.class_(
