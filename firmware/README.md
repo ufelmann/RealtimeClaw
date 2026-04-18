@@ -1,10 +1,18 @@
-# esphome-wyoming-client
+# Firmware — ESPHome Wyoming TCP Client
 
-ESPHome external component that connects Voice PE directly to a Wyoming
-protocol server (like [RealtimeClaw](https://github.com/ufelmann/RealtimeClaw))
-via TCP, bypassing Home Assistant's Assist pipeline.
+ESPHome external component that connects a Voice PE directly to
+[RealtimeClaw](../README.md) over Wyoming Protocol TCP, bypassing Home
+Assistant's Assist pipeline for sub-1s speech-to-speech.
 
-This enables true sub-1s speech-to-speech using xAI/OpenAI Realtime APIs.
+> This folder ships as part of the RealtimeClaw monorepo. In your ESPHome
+> dashboard reference it via:
+>
+> ```yaml
+> external_components:
+>   - source: github://ufelmann/RealtimeClaw@main
+>     path: firmware/components
+>     components: [wyoming_tcp_client]
+> ```
 
 ## How It Works
 
